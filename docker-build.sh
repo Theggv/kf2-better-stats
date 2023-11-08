@@ -1,0 +1,1 @@
+docker compose -f ./backend/compose.yaml -f ./frontend/compose.yaml up -d --build
