@@ -138,7 +138,7 @@ private function DetectPlayerDeath() {
 		if (!IsValidPlayer(C)) continue;
 		if (!GetPlayerStatsIndex(C, i)) continue;
 
-		if (!Players[i].IsDead && C.Pawn != None && !C.Pawn.IsAliveAndWell()) {
+		if (!Players[i].IsDead && ((C.Pawn == None) || (C.Pawn != None && !C.Pawn.IsAliveAndWell()))) {
 			Players[i].IsDead = true;
 		}
 	}
@@ -482,7 +482,7 @@ private function bool GetPlayerLiveData(
 ) {
 	local string UniqueId, PlayerName;
 	local KFPlayerReplicationInfo PRI;
-	local PlayerLiveData Data;
+	local SessionServiceBase.PlayerLiveData Data;
 
 	if (C == None) return false;
 
@@ -506,11 +506,11 @@ private function bool GetPlayerLiveData(
 		Data.IsSpectator = true;
 	}
 
-	if (C.Pawn != None && KFPawn_Human(C.Pawn) != None) {
-		Data.Perk = ConvertPerk(C.GetPerk().GetPerkClass());
-		Data.Level = C.GetPerk().GetLevel();
-		Data.Prestige = C.GetPerk().GetCurrentPrestigeLevel();
+	Data.Perk = ConvertPerk(C.GetPerk().GetPerkClass());
+	Data.Level = C.GetPerk().GetLevel();
+	Data.Prestige = C.GetPerk().GetCurrentPrestigeLevel();
 
+	if (C.Pawn != None && KFPawn_Human(C.Pawn) != None) {
 		Data.Health = KFPawn_Human(C.Pawn).Health;
 		Data.Armor = KFPawn_Human(C.Pawn).Armor;
 	}
