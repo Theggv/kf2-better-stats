@@ -1,4 +1,4 @@
-class StatsServiceBase extends Info
+class API_StatsServiceBase extends Info
 	abstract;
 
 struct RadioCounter {
@@ -129,9 +129,11 @@ struct PlayerData {
 
 	var int Health;
 	var int Armor;
+	var int NumBuffs;
 
 	var bool IsDead;
 	var bool IsSpectator;
+
 
 	var PlayerDataStats Stats;
 
@@ -147,6 +149,7 @@ struct PlayerData {
 
 		Health = 0
 		Armor = 0
+		NumBuffs = 0
 
 		IsDead = false
 		IsSpectator = false

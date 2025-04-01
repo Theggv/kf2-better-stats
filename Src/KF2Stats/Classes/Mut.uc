@@ -2,10 +2,36 @@ class Mut extends KFMutator;
 
 var private KF2Stats KF2Stats;
 
-var float LastZedTimeTimestamp;
+public function AddMutator(Mutator Mut) {
+	if (Mut == Self) return;
 
-public simulated function bool SafeDestroy()
-{
+	if (Mut.Class == Class) {
+		Mut(Mut).SafeDestroy();
+	} else {
+		Super.AddMutator(Mut);
+	}
+}
+
+public event PreBeginPlay() {
+	Super.PreBeginPlay();
+
+	if (WorldInfo.NetMode == NM_Client) return;
+
+	foreach WorldInfo.DynamicActors(class'KF2Stats', KF2Stats) {
+		break;
+	}
+
+	if (KF2Stats == None) {
+		KF2Stats = WorldInfo.Spawn(class'KF2Stats');
+	}
+
+	if (KF2Stats == None) {
+		`Log_Base("FATAL: Can't Spawn 'KF2Stats'");
+		SafeDestroy();
+	}
+}
+
+public simulated function bool SafeDestroy() {
 	return (bPendingDelete || bDeleteMe || Destroy());
 }
 
@@ -37,124 +63,21 @@ function NetDamage(
 	Actor DamageCauser
 ) {
 	super.NetDamage(OriginalDamage, Damage, Injured, InstigatedBy, HitLocation, Momentum, DamageType, DamageCauser);
-
-	// `log(
-	// 	"instigator="$InstigatedBy @
-	// 	"injured="$Injured @
-	// 	"orig_dmg="$OriginalDamage @
-	// 	"mod_dmg="$Damage @
-	// 	"type="$DamageType @
-	// 	"causer="$DamageCauser
-	// );
-
-	if (InstigatedBy == None) return;
-
-	// Detect fleshpound rage from husk backback
-	if (KFPlayerController(InstigatedBy) != None &&
-		KFPawn_ZedFleshpound(Injured) != None &&
-		DamageType == class'KFDT_Explosive_HuskSuicide'
-	) {
-		DetectFPRageFromHuskBP(Damage, KFPawn_ZedFleshpound(Injured), KFPlayerController(InstigatedBy));
-	}
-
-	// Detect husk backback kill
-	if (KFPlayerController(InstigatedBy) != None &&
-		KFPawn_ZedHusk(Injured) != None && Damage == 10000
-	) {
-		KF2Stats.Stats.AddEvent(KFPlayerController(InstigatedBy), ET_HUSK_BACKPACK);
-	}
+	
+	KF2Stats.NetDamage(OriginalDamage, Damage, Injured, InstigatedBy, HitLocation, Momentum, DamageType, DamageCauser);
 }
 
-// detection method from phanta's cd chokepoints
-private function DetectFPRageFromHuskBP(
-	int Damage, 
-	KFPawn_ZedFleshpound Injured, 
-	KFPlayerController InstigatedBy
-) {
-	local KFAIController_ZedFleshpound AI;
-	local KFAIPluginRage_Fleshpound RagePlugin;
-	local DamageModifierInfo DamageModifier;
-	local float mp;
+public function NotifyLogin(Controller C) {
+	KF2Stats.NotifyLogin(C);
 
-	AI = KFAIController_ZedFleshpound(Injured.Controller);
-	if (AI == None) return;
-
-	RagePlugin = AI.RagePlugin;
-
-	if (RagePlugin == None) return;
-	if (RagePlugin.bIsEnraged) return;
-
-	mp = 1.0;
-	foreach class'KFPawn_ZedFleshpound'.default.DamageTypeModifiers(DamageModifier) {
-		if (DamageModifier.DamageType != class'KFDT_Explosive') continue;
-
-		mp = DamageModifier.DamageScale[0];
-	}
-
-	// `log(
-	// 	"multiplier="$mp @
-	// 	"dmg="$RagePlugin.AccumulatedDOT + float(Damage) * mp @
-	// 	"threshold="$RagePlugin.RageDamageThreshold
-	// );
-
-	if (float(RagePlugin.AccumulatedDOT) + float(Damage) * mp < RagePlugin.RageDamageThreshold) return;
-
-	// `log("Detected fp rage from bp");
-	KF2Stats.Stats.AddEvent(InstigatedBy, ET_RAGED_BY_BP);
+	Super.NotifyLogin(C);
 }
 
-function ModifyZedTime(
-	out float out_TimeSinceLastEvent, 
-	out float out_ZedTimeChance, 
-	out float out_Duration
-) {
-	super.ModifyZedTime(out_TimeSinceLastEvent, out_ZedTimeChance, out_Duration);
+public function NotifyLogout(Controller C) {
+	KF2Stats.NotifyLogout(C);
 
-	// no idea how to detect initial zedtime
-	if (out_ZedTimeChance >= 1.0) {
-		if (WorldInfo.RealTimeSeconds - LastZedTimeTimestamp > 3.0) {
-			LastZedTimeTimestamp = WorldInfo.RealTimeSeconds - 5.8; 
-			KF2Stats.Stats.SessionData.ZedTimeCount += 1;
-		}
-
-		KF2Stats.Stats.SessionData.ZedTimeDuration += (out_Duration - 
-			(out_Duration - (WorldInfo.RealTimeSeconds - LastZedTimeTimestamp)));
-
-		LastZedTimeTimestamp = WorldInfo.RealTimeSeconds;
-	}
+	Super.NotifyLogout(C);
 }
 
-public event PreBeginPlay() {
-	Super.PreBeginPlay();
-
-	if (WorldInfo.NetMode == NM_Client) return;
-
-	foreach WorldInfo.DynamicActors(class'KF2Stats', KF2Stats) {
-		break;
-	}
-
-	if (KF2Stats == None) {
-		KF2Stats = WorldInfo.Spawn(class'KF2Stats');
-	}
-
-	if (KF2Stats == None)
-	{
-		`Log_Base("FATAL: Can't Spawn 'KF2Stats'");
-		SafeDestroy();
-	}
-}
-
-public function AddMutator(Mutator Mut)
-{
-	if (Mut == Self) return;
-
-	if (Mut.Class == Class)
-		Mut(Mut).SafeDestroy();
-	else
-		Super.AddMutator(Mut);
-}
-
-defaultproperties
-{
-
+defaultproperties {
 }

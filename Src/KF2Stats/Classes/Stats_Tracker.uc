@@ -1,5 +1,5 @@
-class StatsRepo extends Info
-	dependson (StatsServiceBase);
+class Stats_Tracker extends Info
+	dependson (API_StatsServiceBase, Stats_EventLogger);
 
 enum EventType {
 	ET_HUSK_BACKPACK,
@@ -19,13 +19,13 @@ struct SessionStruct {
 	var int GameDifficulty;
 	var SessionStatus GameStatus;
 
-	var int ServerId;
-	var int MapId;
+	var int SessionCreationAttempt;
 	var int SessionId;
 
 	var int Wave;
 	var bool IsActive;
 	var float WaveStartedAt;
+	var int ZedsLeft;
 
 	var float ZedTimeDuration;
 	var int ZedTimeCount;
@@ -36,8 +36,7 @@ struct SessionStruct {
 		GameDifficulty = 0
 		GameStatus = 0
 
-		ServerId = 0
-		MapId = 0
+		SessionCreationAttempt = 1
 		SessionId = 0
 
 		Wave = 1
@@ -45,26 +44,163 @@ struct SessionStruct {
 		WaveStartedAt = 0
 		ZedTimeDuration = 0
 		ZedTimeCount = 0
+		ZedsLeft = 0
 	}
 };
 
-var array<StatsServiceBase.PlayerData> Players;
-var SessionStruct SessionData;
+var array<API_StatsServiceBase.PlayerData> Players;
+var SessionStruct GameSession;
+
+var private array<string> RawStats;
 
 var private WorldInfo WI;
 var private KFGameInfo KFGI;
 var private KFGameReplicationInfo KFGRI;
 var private OnlineSubsystem OS;
 var private MsgSpectator msgSpec;
+var private Stats_EventLogger EventLog;
 
-static function StatsRepo GetInstance() {
-	local StatsRepo Instance;
+var private float	LastZedTimeEvent;
+var private float	LastZedTimeEventRealtime;
 
-	foreach Class'WorldInfo'.static.GetWorldInfo().DynamicActors(Class'StatsRepo', Instance) {      
+static function Stats_Tracker GetInstance() {
+	local Stats_Tracker Instance;
+
+	foreach Class'WorldInfo'.static.GetWorldInfo().DynamicActors(Class'Stats_Tracker', Instance) {      
 		return Instance;        
 	}
 
 	return Instance;
+}
+
+event Tick(float dt) {
+	if (KFGRI == None || KFGI == None) return;
+
+	DetectCurrentWave();
+
+	if (!KFGI.IsWaveActive()) return;
+
+	if (GameSession.ZedsLeft != KFGRI.AIRemaining) {
+		GameSession.ZedsLeft = KFGRI.AIRemaining;
+
+		EventLog.AddZedsLeftEvent(GameSession.ZedsLeft);
+	}
+
+	DetectZedtime();
+}
+
+private function DetectCurrentWave() {
+	local int currentWave;
+	local bool isWaveActive;
+
+	if (KFGRI == None || KFGI == None) return;
+
+	currentWave = KFGRI.WaveNum;
+	isWaveActive = KFGI.IsWaveActive();
+
+	if (isWaveActive != GameSession.IsActive) {
+		if (isWaveActive) {
+			if (currentWave != GameSession.Wave) {
+				GameSession.Wave = currentWave;
+			}
+
+			OnWaveStarted();
+		} else {
+			SetTimer(0.5, false, 'OnWaveEnded');
+		}
+
+		GameSession.IsActive = isWaveActive;
+	}
+}
+
+private function DetectZedtime() {
+	if (LastZedTimeEvent != KFGI.LastZedTimeEvent && KFGI.ZedTimeRemaining > 0) {
+		if (KFGI.LastZedTimeEvent - LastZedTimeEvent > 5.0) {
+			LastZedTimeEvent = KFGI.LastZedTimeEvent;
+			LastZedTimeEventRealtime = WorldInfo.RealTimeSeconds;
+			GameSession.ZedTimeDuration += 3;
+			GameSession.ZedTimeCount += 1;
+		}
+
+		GameSession.ZedTimeDuration += (WorldInfo.RealTimeSeconds - LastZedTimeEventRealtime);
+
+		LastZedTimeEvent = KFGI.LastZedTimeEvent;
+		LastZedTimeEventRealtime = WorldInfo.RealTimeSeconds;
+
+		EventLog.AddZedTimeEvent();
+	}
+}
+
+private function UpdatePlayerData() {
+	local KFPlayerController C;
+	local KFPawn_Human Pawn;
+	local int I, MaxBuffs, PlayerIndex;
+
+	foreach WI.AllControllers(Class'KFPlayerController', C) {
+		if (!IsValidPlayer(C) || !GetPlayerStatsIndex(C, I)) continue;
+
+		// After player death C.Pawn is None for some reason
+		if (!Players[I].IsDead && (C.Pawn == None || !C.Pawn.IsAliveAndWell())) {
+			Players[I].IsDead = true;
+
+			PlayerIndex = EventLog.ResolvePlayerIndex(C.PlayerReplicationInfo.UniqueId);
+			AddPlayerKilledEvent(PlayerIndex);
+		}
+
+		if (C.Pawn == None || KFPawn_Human(C.Pawn) == None) continue;
+		
+		Pawn = KFPawn_Human(C.Pawn);
+		MaxBuffs = Round((Pawn.GetHealingDamageBoostModifier() - 1) * 20);
+
+		if (Players[I].NumBuffs != MaxBuffs) {
+			Players[I].NumBuffs = MaxBuffs;
+
+			PlayerIndex = EventLog.ResolvePlayerIndex(C.PlayerReplicationInfo.UniqueId);
+			AddBuffsEvent(PlayerIndex, MaxBuffs);
+		}
+
+		if (Players[I].Health != Pawn.Health || Players[I].Armor != Pawn.Armor) {
+			Players[I].Health = Pawn.Health;
+			Players[I].Armor = Pawn.Armor;
+
+			PlayerIndex = EventLog.ResolvePlayerIndex(C.PlayerReplicationInfo.UniqueId);
+			AddChangeHpEvent(PlayerIndex, Pawn.Health, Pawn.Armor);
+		}
+	}
+}
+
+private function AddBuffsEvent(int PlayerIndex, int MaxBuffs) {
+	local Stats_EventLogger.DemoEventStruct DemoEvent;
+
+	DemoEvent.Buffer = EventLog.WriteInt(DemoEvent.Buffer, WorldInfo.RealTimeSeconds * 100);
+	DemoEvent.Buffer = EventLog.WriteByte(DemoEvent.Buffer, EventLog.DEMO_EVENT_TYPE_EVENT_BUFFS);
+	DemoEvent.Buffer = EventLog.WriteByte(DemoEvent.Buffer, PlayerIndex);
+	DemoEvent.Buffer = EventLog.WriteByte(DemoEvent.Buffer, MaxBuffs);
+
+	EventLog.AddEvent(DemoEvent);
+}
+
+private function AddChangeHpEvent(int PlayerIndex, int Health, byte Armor) {
+	local Stats_EventLogger.DemoEventStruct DemoEvent;
+
+	DemoEvent.Buffer = EventLog.WriteInt(DemoEvent.Buffer, WorldInfo.RealTimeSeconds * 100);
+	DemoEvent.Buffer = EventLog.WriteByte(DemoEvent.Buffer, EventLog.DEMO_EVENT_TYPE_EVENT_HP_CHANGE);
+	DemoEvent.Buffer = EventLog.WriteByte(DemoEvent.Buffer, PlayerIndex);
+	DemoEvent.Buffer = EventLog.WriteInt(DemoEvent.Buffer, Health);
+	DemoEvent.Buffer = EventLog.WriteByte(DemoEvent.Buffer, Armor);
+
+	EventLog.AddEvent(DemoEvent);
+}
+
+private function AddPlayerKilledEvent(int PlayerIndex) {
+	local Stats_EventLogger.DemoEventStruct DemoEvent;
+
+	DemoEvent.Buffer = EventLog.WriteInt(DemoEvent.Buffer, WorldInfo.RealTimeSeconds * 100);
+	DemoEvent.Buffer = EventLog.WriteByte(DemoEvent.Buffer, EventLog.DEMO_EVENT_TYPE_PLAYER_DIED);
+	DemoEvent.Buffer = EventLog.WriteByte(DemoEvent.Buffer, PlayerIndex);
+	DemoEvent.Buffer = EventLog.WriteByte(DemoEvent.Buffer, EventLog.ResolveKillReason());
+
+	EventLog.AddEvent(DemoEvent);
 }
 
 function PostBeginPlay() {
@@ -101,64 +237,29 @@ private function PostInit() {
 	}
 
 	msgSpec = Spawn(Class'MsgSpectator');
+	EventLog = class'Stats_EventLogger'.static.GetInstance();
 
-	SetTimer(0.1, true, 'UpdateLoop');
+	SetTimer(0.1, true, 'UpdatePlayerData');
 	SetTimer(15.0, true, 'UpdateGameData');
-}
-
-private function UpdateLoop() {
-	local int currentWave;
-	local bool isWaveActive;
-
-	DetectPlayerDeath();
-
-	currentWave = KFGRI.WaveNum;
-	isWaveActive = KFGI.IsWaveActive();
-
-	if (isWaveActive != SessionData.IsActive) {
-		if (isWaveActive) {
-			if (currentWave != SessionData.Wave) {
-				SessionData.Wave = currentWave;
-			}
-
-			OnWaveStarted();
-		} else {
-			OnWaveEnded();
-		}
-
-		SessionData.IsActive = isWaveActive;
-	}
-}
-
-private function DetectPlayerDeath() {
-    local KFPlayerController C;
-	local int i;
-
-	foreach WI.AllControllers(Class'KFPlayerController', C) {
-		if (!IsValidPlayer(C)) continue;
-		if (!GetPlayerStatsIndex(C, i)) continue;
-
-		if (!Players[i].IsDead && ((C.Pawn == None) || (C.Pawn != None && !C.Pawn.IsAliveAndWell()))) {
-			Players[i].IsDead = true;
-		}
-	}
 }
 
 private function OnWaveStarted() {
     local KFPlayerController C;
 
-	SessionData.WaveStartedAt = WI.RealTimeSeconds;
-	SessionData.ZedTimeDuration = 0.0;
-	SessionData.ZedTimeCount = 0;
+	GameSession.WaveStartedAt = WI.RealTimeSeconds;
+	GameSession.ZedTimeDuration = 0.0;
+	GameSession.ZedTimeCount = 0;
 
-	if (SessionData.SessionId == 0) return;
+	if (GameSession.SessionId == 0) return;
 
-	if (SessionData.Wave == 1) {
-		class'SessionService'.static.GetInstance().UpdateStatus(
-			SessionData.SessionId,
+	if (GameSession.Wave == 1) {
+		class'API_SessionService'.static.GetInstance().UpdateStatus(
+			GameSession.SessionId,
 			SESSION_STATUS_INPROGRESS
 		);
 	}
+
+	EventLog.AddWaveStartEvent(GameSession.Wave, KFGRI.AIRemaining);
 
 	foreach WI.AllControllers(Class'KFPlayerController', C) {
 		if (!IsValidPlayer(C)) continue;
@@ -168,8 +269,10 @@ private function OnWaveStarted() {
 }
 
 private function OnWaveEnded() {
-    local KFPlayerController C;
+	local KFPlayerController C;
 	local int Alive;
+
+	EventLog.AddWaveEndEvent();
 
 	foreach WI.AllControllers(Class'KFPlayerController', C) {
 		if (!IsValidPlayer(C)) continue;
@@ -177,20 +280,20 @@ private function OnWaveEnded() {
 		UpdateNonKillStats(C);
 	}
 
-	if (SessionData.SessionId == 0) return;
+	if (GameSession.SessionId == 0) return;
 	
 	UploadWaveStats();
 
 	Alive = GetAliveCount();
 
 	if (Alive == 0) {
-		class'SessionService'.static.GetInstance().UpdateStatus(
-			SessionData.SessionId,
+		class'API_SessionService'.static.GetInstance().UpdateStatus(
+			GameSession.SessionId,
 			SESSION_STATUS_LOST
 		);
-	} else if (SessionData.Wave == KFGRI.WaveMax) {
-		class'SessionService'.static.GetInstance().UpdateStatus(
-			SessionData.SessionId,
+	} else if (GameSession.Wave == KFGRI.WaveMax) {
+		class'API_SessionService'.static.GetInstance().UpdateStatus(
+			GameSession.SessionId,
 			SESSION_STATUS_WON
 		);
 	}
@@ -201,11 +304,11 @@ private function UploadWaveStats() {
 	local KFPlayerController C;
 	local CreateWaveStatsBody Body;
 
-	Body.SessionId = SessionData.SessionId;
-	Body.Wave = SessionData.Wave;
-	Body.Length = int(WI.RealTimeSeconds - SessionData.WaveStartedAt);
+	Body.SessionId = GameSession.SessionId;
+	Body.Wave = GameSession.Wave;
+	Body.Length = int(WI.RealTimeSeconds - GameSession.WaveStartedAt);
 
-	if (SessionData.GameMode == 3) {
+	if (GameSession.GameMode == 3) {
 		Body.HasCDData = true;
 		Body.CDData.SpawnCycle = class'CD_Utils'.static.GetSpawnCycle(WI);
 		Body.CDData.MaxMonsters = class'CD_Utils'.static.GetMaxMonsters(WI);
@@ -218,8 +321,8 @@ private function UploadWaveStats() {
 		if (!GetPlayerStatsIndex(C, i)) continue;
 
 		if (Players[i].Perk == 2) {
-			Players[i].Stats.ZedTimeLength = SessionData.ZedTimeDuration;
-			Players[i].Stats.ZedTimeCount = SessionData.ZedTimeCount;
+			Players[i].Stats.ZedTimeLength = GameSession.ZedTimeDuration;
+			Players[i].Stats.ZedTimeCount = GameSession.ZedTimeCount;
 		} else {
 			Players[i].Stats.ZedTimeLength = 0.0;
 			Players[i].Stats.ZedTimeCount = 0;
@@ -228,7 +331,7 @@ private function UploadWaveStats() {
 		Body.Players.AddItem(Players[i]);
 	}
 
-	class'StatsService'.static.GetInstance().CreateWaveStats(Body);
+	class'API_StatsService'.static.GetInstance().CreateWaveStats(Body);
 
 	foreach WI.AllControllers(Class'KFPlayerController', C) {
 		if (!IsValidPlayer(C)) continue;
@@ -247,9 +350,14 @@ private function UploadWaveStats() {
 }
 
 function AddZedKill(KFPlayerController C, name ZedKey) {
-	local int i;
+	local int i, PlayerIndex;
 
 	if (!GetPlayerStatsIndex(C, i)) return;
+
+	if (C.PlayerReplicationInfo != None) {
+		PlayerIndex = EventLog.ResolvePlayerIndex(C.PlayerReplicationInfo.UniqueId);
+		EventLog.AddZedKillEvent(PlayerIndex, ZedKey);
+	}
 
 	switch (ZedKey) {
 		case 'KFPawn_ZedClot_Cyst': 
@@ -328,7 +436,7 @@ function AddZedKill(KFPlayerController C, name ZedKey) {
 }
 
 function AddEvent(KFPlayerController C, EventType type) {
-	local int i;
+	local int i, PlayerIndex;
 
 	if (!GetPlayerStatsIndex(C, i)) return;
 
@@ -338,6 +446,12 @@ function AddEvent(KFPlayerController C, EventType type) {
 			return;
 		case ET_RAGED_BY_BP:
 			Players[i].Stats.HuskRages++;
+
+			if (C.PlayerReplicationInfo != None) {
+				PlayerIndex = EventLog.ResolvePlayerIndex(C.PlayerReplicationInfo.UniqueId);
+				EventLog.AddHuskRageEvent(PlayerIndex);
+			}
+
 			return;
 		default:
 			return;
@@ -387,7 +501,7 @@ function UpdateNonKillStats(KFPlayerController C) {
 
 	Players[i].Stats.ShotsFired += C.ShotsFired;
 	Players[i].Stats.ShotsHit += C.ShotsHit;
-	Players[i].Stats.ShotsHS = C.MatchStats.GetHeadShotsInWave();
+	Players[i].Stats.ShotsHS += C.ShotsHitHeadshot;
 	Players[i].Stats.DoshEarned = C.MatchStats.GetDoshEarnedInWave();
 	Players[i].Stats.HealsGiven = C.MatchStats.GetHealGivenInWave();
 	Players[i].Stats.HealsReceived = C.MatchStats.GetHealReceivedInWave();
@@ -398,6 +512,7 @@ function UpdateNonKillStats(KFPlayerController C) {
 function ResetPlayerData(KFPlayerController C) {
 	local int i;
 	local PlayerReplicationInfo PRI;
+	local Stats_EventLogger.DemoEventStruct DemoEvent;
 
 	if (!GetPlayerStatsIndex(C, i)) return;
 
@@ -409,9 +524,9 @@ function ResetPlayerData(KFPlayerController C) {
 	Players[i].Prestige = C.GetPerk().GetCurrentPrestigeLevel();
 	Players[i].IsDead = false;
 
-	Players[i].Stats.ShotsFired = -C.ShotsFired;
-	Players[i].Stats.ShotsHit = -C.ShotsHit;
-	Players[i].Stats.ShotsHS = 0;
+	Players[i].Stats.ShotsFired = -Players[i].Stats.ShotsFired;
+	Players[i].Stats.ShotsHit = -Players[i].Stats.ShotsHit;
+	Players[i].Stats.ShotsHS = -Players[i].Stats.ShotsHS;
 
 	Players[i].Stats.DoshEarned = 0;
 
@@ -441,25 +556,32 @@ function ResetPlayerData(KFPlayerController C) {
 	Players[i].Stats.Kills.Custom = 0;
 	Players[i].Stats.HuskBackpackKills = 0;
 	Players[i].Stats.HuskRages = 0;
+
+	DemoEvent.Buffer = EventLog.WriteInt(DemoEvent.Buffer, WorldInfo.RealTimeSeconds * 100);
+	DemoEvent.Buffer = EventLog.WriteByte(DemoEvent.Buffer, EventLog.DEMO_EVENT_TYPE_PLAYER_PERK);
+	DemoEvent.Buffer = EventLog.WriteByte(DemoEvent.Buffer, EventLog.ResolvePlayerIndex(PRI.UniqueId));
+	DemoEvent.Buffer = EventLog.WriteByte(DemoEvent.Buffer, Players[i].Perk);
+
+	EventLog.AddEvent(DemoEvent);
 }
 
 private function UpdateGameData() {
 	local KFPlayerController C;
-	local SessionServiceBase.UpdateGameDataRequest Body;
-	local SessionServiceBase.PlayerLiveData PLiveData;
+	local API_SessionServiceBase.UpdateGameDataRequest Body;
+	local API_SessionServiceBase.PlayerLiveData PLiveData;
 
-	if (SessionData.SessionId <= 0) return;
+	if (GameSession.SessionId <= 0) return;
 
-	Body.SessionId = SessionData.SessionId;
+	Body.SessionId = GameSession.SessionId;
 
-	Body.GameData.Wave = SessionData.Wave;
-	Body.GameData.IsTraderTime = !SessionData.IsActive;
+	Body.GameData.Wave = GameSession.Wave;
+	Body.GameData.IsTraderTime = !GameSession.IsActive;
 	Body.GameData.ZedsLeft = KFGRI.AIRemaining;
 	Body.GameData.PlayersAlive = GetAliveCount();
 	Body.GameData.PlayersOnline = GetConnectedCount();
 	Body.GameData.MaxPlayers = WI.Game.MaxPlayersAllowed;
 
-	if (SessionData.GameMode == 3) {
+	if (GameSession.GameMode == 3) {
 		Body.HasCDData = true;
 		Body.CDData.SpawnCycle = class'CD_Utils'.static.GetSpawnCycle(WI);
 		Body.CDData.MaxMonsters = class'CD_Utils'.static.GetMaxMonsters(WI);
@@ -473,16 +595,16 @@ private function UpdateGameData() {
 		Body.Players.AddItem(PLiveData);
 	}
 
-	class'SessionService'.static.GetInstance().UpdateGameData(Body);
+	class'API_SessionService'.static.GetInstance().UpdateGameData(Body);
 }
 
 private function bool GetPlayerLiveData(
 	KFPlayerController C,
-	out SessionServiceBase.PlayerLiveData OutData
+	out API_SessionServiceBase.PlayerLiveData OutData
 ) {
 	local string UniqueId, PlayerName;
 	local KFPlayerReplicationInfo PRI;
-	local SessionServiceBase.PlayerLiveData Data;
+	local API_SessionServiceBase.PlayerLiveData Data;
 
 	if (C == None) return false;
 
@@ -549,7 +671,7 @@ private function bool GetPlayerStatsByPRI(
 	optional out int Index
 ) {
 	local string UniqueId, PlayerName;
-	local StatsServiceBase.PlayerData Iter;
+	local API_StatsServiceBase.PlayerData Iter;
 
 	if (PRI == None) return false;
 

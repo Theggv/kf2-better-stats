@@ -1,5 +1,5 @@
-class SessionServiceBase extends Info
-	dependson (StatsServiceBase)
+class API_SessionServiceBase extends Info
+	dependson (API_StatsServiceBase)
 	abstract;
 
 struct GameDataStruct {
@@ -47,23 +47,22 @@ struct UpdateGameDataRequest {
 	var GameDataStruct GameData;
 
 	var bool HasCDData;
-	var StatsServiceBase.CDStruct CDData;
+	var API_StatsServiceBase.CDStruct CDData;
 
 	var array<PlayerLiveData> Players;
 };
 
 static function string PrepareCreateSessionBody( 
-	int ServerId,
-	int MapId,
-	int Difficulty,
-	int Length,
-	int Mode
+	string ServerName, string ServerAddress,
+	string MapName,
+	int Difficulty, int Length, int Mode
 ) {
 	local JsonObject JSON;
 
 	JSON = new Class'JsonObject';
-	JSON.SetIntValue("server_id", ServerId);
-	JSON.SetIntValue("map_id", MapId);
+	JSON.SetStringValue("server_name", ServerName);
+	JSON.SetStringValue("server_address", ServerAddress);
+	JSON.SetStringValue("map_name", MapName);
 	JSON.SetIntValue("diff", Difficulty);
 	JSON.SetIntValue("length", Length);
 	JSON.SetIntValue("mode", Mode);
@@ -73,9 +72,11 @@ static function string PrepareCreateSessionBody(
 
 delegate OnCreateSessionCompleted(int sessionId);
 
+delegate OnCreateSessionFailed();
+
 function CreateSession(
-	int ServerId,
-	int MapId,
+	string ServerName, string ServerAddress,
+	string MapName,
 	int Difficulty,
 	int Length,
 	int Mode
@@ -148,3 +149,5 @@ static function string PrepareUpdateGameDataBody(UpdateGameDataRequest body) {
 }
 
 function UpdateGameData(UpdateGameDataRequest body);
+
+function UploadDemo(array<byte> Payload);
